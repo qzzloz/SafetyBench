@@ -132,6 +132,12 @@ class ResultEvaluator(BasePipeline):
             if evaluation_result.metadata is None:
                 evaluation_result.metadata = {}
             evaluation_result.metadata["evaluator_name"] = evaluator_name
+            # 실제 judge 모델명도 기록 (파일명뿐 아니라 파일 내용으로도 구분되게)
+            evaluation_result.metadata["judge_model"] = (
+                self.evaluation_configs.get("evaluator_params", {})
+                .get(evaluator_name, {})
+                .get("model", evaluator_name)
+            )
 
             self.logger.debug(
                 f"Successfully evaluated response {model_response.test_case_id}"
@@ -244,12 +250,21 @@ class ResultEvaluator(BasePipeline):
                 continue
 
             # Generate filename for this combination
+            # 파일명의 evaluator 자리에 evaluator 이름(default_judge) 대신
+            # 실제 judge 모델명(evaluator_params.<evaluator>.model, 예: qwen2.5-vl-32b-judge)
+            # 을 넣어, 어떤 judge 로 채점했는지 파일명으로 구분되게 한다.
+            # model 이 지정 안 됐으면 기존처럼 evaluator_name 으로 폴백.
+            judge_model_for_name = (
+                self.evaluation_configs.get("evaluator_params", {})
+                .get(evaluator_name, {})
+                .get("model", evaluator_name)
+            )
             _, combo_filename = self._generate_filename(
                 "evaluation",
                 attack_name=attack_name,
                 model_name=model_name,
                 defense_name=defense_name,
-                evaluator_name=evaluator_name,
+                evaluator_name=judge_model_for_name,
             )
 
             # Calculate expected evaluation result count for this combination

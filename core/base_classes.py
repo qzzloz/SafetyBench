@@ -364,6 +364,63 @@ class BaseDefense(BaseComponent, ABC):
         return f"{self.name}(config={self.config})"
 
 
+class BaseGuard(BaseDefense):
+    """Guard / safety-classifier base class.
+
+    A guard is a defense whose job is to *classify* an input as safe / unsafe
+    (and optionally block it), rather than transform the input. Unlike a plain
+    BaseDefense, every guard call records a structured verdict into the test
+    case metadata, so the downstream pipeline can measure the guard itself
+    (detection rate, bypass rate, false-positive rate) -- not just the final
+    target-model response.
+
+    Implementation note: all guards terminate `apply_defense` by calling one of
+    `block_input` (unsafe), `reply_directly` (safe, answered directly), or
+    `create_defended_case` (safe, passed through). All three funnel through
+    `create_defended_case`, so overriding it here captures the verdict for every
+    guard and every pipeline path WITHOUT touching individual guard files.
+    """
+
+    META_KEY_GUARD_NAME = "guard_name"
+    META_KEY_GUARD_VERDICT = "guard_verdict"  # "safe" | "unsafe"
+    META_KEY_GUARD_BLOCKED = "guard_blocked"  # bool
+
+    def create_defended_case(
+        self,
+        test_case: TestCase,
+        defended_prompt: str = None,
+        defended_image_path: str = None,
+        metadata: Dict[str, Any] = None,
+    ) -> TestCase:
+        md = dict(metadata or {})
+
+        # block_input / reply_directly both route through here with marker keys.
+        blocked = bool(
+            md.get(self.META_KEY_SHOULD_BLOCK, False)
+            or md.get(self.META_KEY_BLOCKED, False)
+        )
+
+        guard_name = (
+            getattr(self, "registry_name", None)
+            or getattr(self, "name", None)
+            or self.__class__.__name__
+        )
+
+        md.setdefault(self.META_KEY_GUARD_NAME, guard_name)
+        md.setdefault(self.META_KEY_GUARD_VERDICT, "unsafe" if blocked else "safe")
+        md.setdefault(self.META_KEY_GUARD_BLOCKED, blocked)
+
+        return super().create_defended_case(
+            test_case=test_case,
+            defended_prompt=defended_prompt,
+            defended_image_path=defended_image_path,
+            metadata=md,
+        )
+
+    def __str__(self):
+        return f"{self.name}(config={self.config})"
+
+
 class BaseEvaluator(BaseComponent, ABC):
     """Evaluator base class (enhanced version)"""
 

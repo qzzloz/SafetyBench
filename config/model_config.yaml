@@ -16,9 +16,18 @@
 #         api_key: ${CUSTOM_KEY} # Optional, override provider's api_key
 
 providers:
+  local_vl:
+      models:
+        qwen2.5-vl-32b-judge:
+          model_name: "/scratch/x3411a15/models/Qwen2.5-VL-32B-Instruct"
+          max_tokens: 512
+          load_model: true
+          load_in_4bit: true
+          provider: local_vl 
+
   # OpenAI Provider
   openai:
-    api_key: "sk-your-openai-api-key-here"  # Write specific API key directly
+    api_key: "YOUR_OPENAI_API_KEY"  # Write specific API
     base_url: null  # Use OpenAI official API
     models:
       gpt-5:
@@ -27,6 +36,10 @@ providers:
         temperature: 0.0
       gpt-4-turbo:
         model_name: "gpt-4-turbo"
+        max_tokens: 1000
+        temperature: 0.0
+      gpt-4o-mini:
+        model_name: "gpt-4o-mini"
         max_tokens: 1000
         temperature: 0.0
 
@@ -45,7 +58,8 @@ providers:
 
   # Anthropic Claude Provider
   anthropic:
-    api_key: "sk-ant-your-anthropic-api-key-here"  # Write specific API key directly
+    # api_key: "sk-ant-your-anthropic-api-key-here"  # Write specific API key directly
+    api_key: "YOUR_OPENAI_API_KEY"  # Write specific API
     models:
       claude-sonnet-4:
         model_name: "claude-3-5-sonnet-20241022"
@@ -90,6 +104,12 @@ providers:
         temperature: 0.0
         base_url: "http://localhost:8008/v1"  # Model-level override
 
+      # qwen2.5-vl-7b:
+      #   model_name: "Qwen/Qwen2.5-VL-7B-Instruct" 
+      #   max_tokens: 1000
+      #   temperature: 0.0
+      #   base_url: "http://localhost:8008/v1" 
+
       # defense model
 
       ShieldLM-14B-qwen:
@@ -125,23 +145,42 @@ providers:
         temperature: 0.0
         base_url: "http://localhost:8005/v1"
 
+  local:
+      models:
+        # target model (RTX 4090, loaded directly by models/qwen_local_model.py)
+        qwen2.5-vl-7b-local:
+          model_name: "/scratch/x3411a15/models/Qwen2.5-VL-7B-Instruct"  # 로컬 weight 경로
+          max_tokens: 512
+          temperature: 0.0
+          load_model: true
+
+  local_llm:
+      models:
+        llama-3.3-70b-judge:
+          model_name: "/scratch/x3411a15/models/Llama-3.3-70B-Instruct"
+          max_tokens: 128
+          temperature: 0.0
+          load_model: true       # 무거운 로컬 모델 → 1회 로딩, 병렬 금지
+          load_in_4bit: true     # 4비트 양자화
+
+          
   # Any platform compatible with OpenAI
   any:
-    api_key: "your-api-key"  # Write specific API key directly
-    base_url: "your-base-url"  # Model-level override
+    api_key: "YOUR_OPENAI_API_KEY"  # Write specific API
+    base_url: null
     models:
       gpt-4o:
         model_name: "gpt-4o"
-        max_tokens: 2000
-        temperature: 0.0
-      gpt-3.5-turbo:
-        model_name: "gpt-3.5-turbo"
         max_tokens: 1000
         temperature: 0.0
-      gpt-4o-mini:
-        model_name: "gpt-4o-mini"
-        max_tokens: 2000
-        temperature: 0.0
+      # gpt-3.5-turbo:
+      #   model_name: "gpt-3.5-turbo"
+      #   max_tokens: 1000
+      #   temperature: 0.0
+      # gpt-4o-mini:
+      #   model_name: "gpt-4o-mini"
+      #   max_tokens: 1000
+      #   temperature: 0.0
 
 # ============ Model Default Configuration ============
 defaults:

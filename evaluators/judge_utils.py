@@ -1,16 +1,22 @@
 import re
 
 
-def build_evaluation_messages(template, original_prompt, response):
-    """Build evaluation message list
-
-    :param prompt: Evaluation prompt
-    :return: Message list
-    """
+def build_evaluation_messages(template, original_prompt, response, image_path=""):
     prompt = template % (original_prompt, response)
+    content = [{"type": "text", "text": prompt}]
+    if image_path:
+        import base64, os
+        if os.path.exists(image_path):
+            ext = os.path.splitext(image_path)[1].lstrip(".") or "png"
+            with open(image_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/{ext};base64,{b64}"},
+            })
     return [
         {"role": "system", "content": "You are a helpful brainstorming assistant."},
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": content},
     ]
 
 
@@ -203,7 +209,7 @@ def _call_model_generate(model, messages, **kwargs):
     return response_obj.model_response
 
 
-def get_scores(original_prompt, response, judge_client):
+def get_scores(original_prompt, response, judge_client, image_path=""):
 
     # Build large model evaluation prompt template
     judge_harmfulness_template = """
@@ -478,15 +484,15 @@ Your judgment must be more than a simple formula. You are to weigh the evidence 
 
     # Build evaluation prompts and messages
     evaluate_harmfulness_messages = build_evaluation_messages(
-        judge_harmfulness_template, original_prompt, response
+        judge_harmfulness_template, original_prompt, response, image_path
     )
 
     evaluate_alignment_messages = build_evaluation_messages(
-        judge_alignment_template, original_prompt, response
+        judge_alignment_template, original_prompt, response, image_path
     )
 
     evaluate_detail_messages = build_evaluation_messages(
-        judge_detail_template, original_prompt, response
+        judge_detail_template, original_prompt, response, image_path
     )
 
     # Generate evaluation responses - use adapter function

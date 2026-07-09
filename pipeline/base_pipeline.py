@@ -50,6 +50,23 @@ class BasePipeline(ABC):
         Returns:
             Generated filename
         """
+        # 파일명에 들어갈 이름 값들에서 경로 구분자/위험 문자를 안전하게 치환.
+        # (로컬 모델 model_name 이 "/home/.../Qwen2.5-VL-7B-Instruct" 처럼 슬래시를
+        #  포함하면 파일명이 폴더 경로로 잘못 해석되어 저장 에러가 나는 것을 방지)
+        def _sanitize(val):
+            if not isinstance(val, str):
+                return val
+            cleaned = val.strip().strip("/")          # 앞뒤 슬래시 제거
+            cleaned = cleaned.split("/")[-1]           # 경로면 마지막 요소(모델 폴더명)만
+            for ch in ("/", "\\", ":", " "):
+                cleaned = cleaned.replace(ch, "_")
+            return cleaned
+
+        for _k in ("attack_name", "model_name", "defense_name",
+                   "target_model_name", "evaluator_name"):
+            if _k in context and isinstance(context[_k], str):
+                context[_k] = _sanitize(context[_k])
+
         if stage_name:
             stage_dir = self._get_stage_dir_name(stage_name)
             output_dir = Path(self.config.system["output_dir"]) / stage_dir

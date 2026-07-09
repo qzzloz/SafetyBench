@@ -1,4 +1,4 @@
 name: "llama_guard_3"
 
 parameters:
-  Llama-Guard-3: /path/to/meta-llama/Llama-Guard-3-11B-Vision
+  Llama-Guard-3: /scratch/x3411a15/models/Llama-Guard-3-11B-Vision

@@ -15,7 +15,7 @@ class BaseModel(CoreBaseModel):
         "[ERROR] Prompt detected as harmful content, refusing to answer"
     )
     API_QUERY_SLEEP = 0.5
-    API_MAX_RETRY = 3
+    API_MAX_RETRY = 10
     API_TIMEOUT = 600
 
     # Content policy detection keywords (common across providers)
@@ -139,6 +139,8 @@ class BaseModel(CoreBaseModel):
             Exception,
             max_tries=self.API_MAX_RETRY,
             max_time=self.API_TIMEOUT * 2,
+            base=2,
+            factor=30,
             on_backoff=lambda details: print(
                 f"Attempt {details['tries']} failed: {details['exception'].__class__.__name__}: {details['exception']}"
             ),

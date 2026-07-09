@@ -15,9 +15,11 @@ Usage examples:
 
     # Run only test case generation
     python run_pipeline.py --config config/general_config.yaml --stage test_case_generation
+    python run_pipeline.py --config config/guard_eval_config.yaml --stage test_case_generation
 
     # Generate response from specified test case file
     python run_pipeline.py --config config/general_config.yaml --stage response_generation --test-cases-file output/test_cases/jood/test_cases.json
+    python run_pipeline.py --config config/guard_eval_config.yaml --stage response_generation --test-cases-file output/test_cases/jood/test_cases.json
 
     # Run multiple stages in combination
     python run_pipeline.py --config config/general_config.yaml --stages test_case_generation,response_generation, evaluation
@@ -26,6 +28,8 @@ Usage examples:
     python run_pipeline.py --config config/general_config.yaml --stage evaluation --input-file output/model_responses.json
 """
 
+# python run_pipeline.py --config config/guard_eval_config.yaml --stage response_generation --test-cases-file output_qwen/test_cases/figstep/test_cases.jsonl 
+# 이거 할 차례
 import argparse
 import sys
 import json
