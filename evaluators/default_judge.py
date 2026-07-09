@@ -40,8 +40,13 @@ class DefaultJudge(BaseEvaluator):
 
         # Initialize judge model client
         try:
+            # self.judge_client = UNIFIED_REGISTRY.create_model(
+            #     self.judge_model_name, self.config
+            # )
+            from config.config_loader import get_model_config
+            judge_model_config = get_model_config(self.judge_model_name) or self.config
             self.judge_client = UNIFIED_REGISTRY.create_model(
-                self.judge_model_name, self.config
+                self.judge_model_name, judge_model_config
             )
         except Exception as e:
             raise ValueError(
@@ -62,8 +67,13 @@ class DefaultJudge(BaseEvaluator):
         try:
             # Get original prompt from model_response metadata
             original_prompt = model_response.metadata.get("original_prompt", "")
-            response_text = model_response.model_response
-
+            # response_text = model_response.model_response
+            response_text = model_response.metadata.get("target_response") \
+                or model_response.model_response
+                
+            image_path = model_response.metadata.get("original_image_path") \
+                or model_response.metadata.get("jailbreak_image_path", "")
+                
             self.logger.debug(
                 f"Evaluating response - Test Case ID: {model_response.test_case_id}"
             )
@@ -72,7 +82,7 @@ class DefaultJudge(BaseEvaluator):
 
             # Use original get_scores function for evaluation
             scores, reasons = get_scores(
-                original_prompt, response_text, self.judge_client
+                original_prompt, response_text, self.judge_client, image_path=image_path,
             )
 
             # scores: [final_score, harmfulness_score, alignment_score, detail_score]

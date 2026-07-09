@@ -1,0 +1,108 @@
+# =====================================================================
+# Guard-model evaluation config
+#   목적: 기존 공격(figstep / hades / viscra)으로 멀티모달 가드 모델들을
+#         돌려 "가드가 공격을 잡는지/놓치는지(verdict)"를 측정한다.
+#   사용:
+#     1) 테스트케이스 생성 + 응답(=가드 판정) 생성만 실행
+#        python run_pipeline.py --config config/guard_eval_config.yaml \
+#               --stages test_case_generation,response_generation
+#     2) 가드 판정 집계
+#        python analyze_guard_results.py
+#   (가드 판정은 default_judge 평가 없이도 나오므로 evaluation 단계는 선택)
+
+# =====================================================================
+# 진짜사용법
+#   1) 테스트케이스 생성
+#   python run_pipeline.py --config config/guard_eval_config.yaml --stage test_case_generation
+# 
+#   2) 모델 응답 생성 (가드없이, config에서 가드 None으로)
+#   python run_pipeline.py --config config/guard_eval_config.yaml --stage response_generation
+# 
+#   3) 가드 판정 생성
+#   python eval_guard_standalone.py \
+#         --guard llama_guard_3 \
+#         --responses output_qwen/responses/None/attack_elite_model_qwen2.5-vl-7b-local.jsonl \
+#         --out-dir output_qwen/responses
+# 
+#   4) 전체 eval 파일 생성
+#   python run_pipeline.py --config config/guard_eval_config.yaml --stage evaluation --input-file output_qwen/responses/None/attack_elite_model_qwen2.5-vl-7b-local.jsonl
+# 
+#   5) 메트릭 결과 표
+#   python analyze_guard_results.py \
+#         --responses-dir output_qwen/responses \
+#         --evaluations-dir output_qwen/evaluations \
+#         --out output_qwen/guard_report
+
+# =====================================================================
+
+# ============ Stage 1: Test Case Generation ============
+test_case_generation:
+  input:
+    behaviors_file: "dataset/elite_test.json"
+
+  attacks:
+    # - "figstep"    
+    # - "hades"
+    # - "viscra"
+    - "elite"
+    # - "new"
+    # - "siuo"
+
+
+
+# ============ Stage 2: Response Generation (= Guard verdict) ============
+response_generation:
+  # 타깃 모델: 가드 판정 자체는 타깃과 무관하지만 파이프라인상 1개 필요.
+  # 통과(safe) 케이스만 타깃을 호출하므로 저렴한 모델 1개로 충분.
+  models:
+    # - "gpt-4o-mini"
+    - "qwen2.5-vl-7b-local"
+
+  # 적용할 멀티모달 가드들. 호스팅 못 하는 건 주석 처리하면 됨.
+  # (각 가드의 가중치/엔드포인트는 config/defenses/<name>.yaml 와
+  #  config/model_config.yaml 에서 설정 — README 의 vLLM 섹션 참고)
+  defenses:
+    # --- VLM 기반 가드 모델 (image+text → safe/unsafe 분류) ---
+    # - "llama_guard_4"       # Llama Guard 4 12B (멀티모달)
+    - "llama_guard_3"       # Llama-Guard-3-11B-Vision (멀티모달)
+    # - "llavaguard"          # LlavaGuard (vLLM)
+    # - "guardreasoner_vl"    # GuardReasoner-VL (vLLM)
+    # - "qguard"              # QGuard (InternVL, 로컬 로딩)
+    # --- 멀티모달 탐지 프레임워크 (분류기 형태로 차단) ---
+    # - "cider"               # 크로스모달 정보 체크
+    # - "hiddendetect"        # hidden-state 모니터링
+    # - "jailguard"           # 입력 변이 기반 탐지
+    # --- 텍스트 가드(참고용, 멀티모달 아님) ---
+    # - "shieldlm"
+    # --- 가드 없음 베이스라인(원하면 활성화) ---
+    # - "None"
+
+# ============ Stage 3: Evaluation (선택) ============
+# 가드 판정만 볼 거면 이 단계는 건너뛰어도 됨(analyze_guard_results.py 사용).
+# 타깃 모델의 실제 탈옥 성공 여부까지 보고 싶을 때만 사용.
+evaluation:
+  evaluators:
+    - "default_judge"
+  evaluator_params:
+    default_judge:
+      # model: "qwen2.5-vl-7b-local"   # gpt-oss:120b → 로컬 Qwen으로 변경
+      # model: "llama-3.3-70b-judge"
+      model: "qwen2.5-vl-32b-judge"
+      success_threshold: 3
+      max_tokens: 512               # 130000 → 1000 (Qwen 한계에 맞게 축소)
+      temperature: 0.0
+      max_workers: 1                 # 100 → 1 (로컬 모델이라 병렬 금지, OOM 방지)
+
+# ============ System ============
+system:
+  output_dir: "output_qwen/"
+  max_workers: 1
+  batch_size: 2
+  log_level: "INFO"
+  log_file: "logs/guard_eval.log"
+
+# ============ Experiment ============
+experiment:
+  mode: "full"
+  random_seed: 42
+  verbose: false

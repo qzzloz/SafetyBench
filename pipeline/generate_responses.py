@@ -122,9 +122,12 @@ class ResponseGenerator(BasePipeline):
 
     @log_with_context("Generate single model response")
     def generate_single_response(
-        self, test_case: TestCase, model_name: str, defense_name: str
+        self, test_case: TestCase, model_name: str, defense_name: str, _done_ids: set = None
     ) -> ModelResponse:
         """Generate response for a single test case, supports post-processing defense"""
+        # Skip already completed test cases
+        if _done_ids and str(test_case.test_case_id) in _done_ids:
+            return None
         defense_instance = None
         try:
             # Apply defense, get defense instance
@@ -422,6 +425,10 @@ class ResponseGenerator(BasePipeline):
         # Create (and reuse) local model instance
         model_config = self.response_configs.get("model_params", {}).get(model_name, {})
         model = UNIFIED_REGISTRY.create_model(model_name, model_config)
+        # 통합 모드: 파이프라인이 만든 타깃 모델을 가드가 재사용하도록 주입.
+        # (가드가 자기 타깃을 새로 만들면 GPU0 에 Qwen 이 두 개 올라가 OOM)
+        if defense_instance is not None and hasattr(type(defense_instance), "_shared_target_model"):
+            type(defense_instance)._shared_target_model = model
 
         all_responses: List[ModelResponse] = []
         test_cases_only = [t[0] for t in combo_tasks]
@@ -689,20 +696,25 @@ class ResponseGenerator(BasePipeline):
                     f"Defense {defense_name} doesn't need to load model and model {model_name} is API model, using multi-threaded parallel processing"
                 )
 
+                # Load already completed IDs to skip
+                existing_responses = self.load_results(combo_filename)
+                done_ids = {str(r.get("test_case_id")) for r in existing_responses}
+                self.logger.info(f"Skipping {len(done_ids)} already completed responses")
                 # Prepare processing function
                 def process_task(task_item):
                     test_case, model_name, defense_name, task_id = task_item
                     try:
                         response = self.generate_single_response(
-                            test_case, model_name, defense_name
+                            test_case, model_name, defense_name, _done_ids=done_ids
                         )
+                        if response is None:
+                            return None
                         response_dict = response.to_dict()
                         return response_dict
                     except Exception as e:
                         self.logger.error(
                             f"Task failed ({test_case.test_case_id}, {model_name}, {defense_name}): {e}"
                         )
-                        # Directly return None, don't save failed data
                         return None
 
                 # For API models and defenses that don't need to load models, use parallel strategy
