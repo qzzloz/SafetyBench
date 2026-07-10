@@ -5,6 +5,7 @@ version: 1
 plugins:
 
   attacks:
+    jailbound: [attacks.jailbound.attack, JailBoundAttack]
     figstep: [attacks.figstep.attack, FigStepAttack]
     elite: [attacks.elite.attack, EliteAttack]
     cs_dj: [attacks.cs_dj.attack, CSDJAttack]
