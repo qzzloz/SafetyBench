@@ -68,6 +68,7 @@ echo "[4/4] analyze  $(date)"
 python analyze_guard_results.py \
     --responses-dir output_qwen/responses/llama_guard_3 \
     --evaluations-dir output_qwen/evaluations \
+    --judge qwen2.5-vl-32b-judge \
     --out output_qwen/guard_report
 
 echo "=============================================="
