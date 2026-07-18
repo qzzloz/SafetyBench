@@ -260,17 +260,46 @@ class QwenVLWhiteBox:
         """(V, H) input embedding matrix for embedding-space suffix search."""
         return self.model.get_input_embeddings().weight
 
+    def _image_embeds(self, pixel_values, image_grid_thw):
+        """Version-robust image features. Newer transformers move the vision
+        tower under model.model.visual and expose get_image_features(); older
+        ones have model.visual(pixel_values, grid_thw=...)."""
+        torch = self.torch
+        pv = pixel_values.to(self.model.device, self.dtype)
+        # 1) preferred: high-level API
+        if hasattr(self.model, "get_image_features"):
+            img = self.model.get_image_features(pixel_values=pv, image_grid_thw=image_grid_thw)
+            if isinstance(img, (list, tuple)):
+                img = torch.cat([x for x in img], dim=0)
+            return img.reshape(-1, img.shape[-1])
+        # 2) fallback: locate the visual tower and call it directly
+        for getter in (lambda: self.model.visual,
+                       lambda: self.model.model.visual,
+                       lambda: self.model.model.model.visual):
+            try:
+                vt = getter()
+            except AttributeError:
+                continue
+            if vt is not None:
+                out = vt(pv, grid_thw=image_grid_thw)
+                return out.reshape(-1, out.shape[-1])
+        raise AttributeError("could not locate the Qwen2.5-VL vision tower "
+                             "(tried get_image_features, .visual, .model.visual)")
+
+    def _image_token_id(self):
+        cfg = self.model.config
+        for attr in ("image_token_id", "image_token_index"):
+            if getattr(cfg, attr, None) is not None:
+                return getattr(cfg, attr)
+        raise AttributeError("no image_token_id/image_token_index on config")
+
     def build_merged_embeds(self, input_ids, pixel_values, image_grid_thw):
         """Manually build inputs_embeds with image features scattered in, so we
         can then swap in a differentiable suffix embedding. Mirrors what the
         model does internally (verified by embed_parity_check)."""
-        torch = self.torch
         emb = self.model.get_input_embeddings()(input_ids)          # (1,T,H)
-        image_embeds = self.model.visual(
-            pixel_values.to(self.model.device, self.dtype),
-            grid_thw=image_grid_thw,
-        )
-        mask = (input_ids == self.model.config.image_token_id)
+        image_embeds = self._image_embeds(pixel_values, image_grid_thw)
+        mask = (input_ids == self._image_token_id())
         emb = emb.clone()
         emb[mask] = image_embeds.to(emb.dtype)
         return emb
@@ -297,23 +326,47 @@ class QwenVLWhiteBox:
             reps[l] = vec.squeeze(0).float()
         return reps, (out.logits if need_logits else None)
 
-    def embed_parity_check(self, text, image, atol: float = 2e-2) -> bool:
-        """Verify the manual merge (build_merged_embeds + forward_from_embeds)
-        matches the standard input_ids+pixel_values forward. Run once before
-        trusting the suffix stage."""
+    def forward_with_suffix(self, input_ids, attention_mask, pixel_values,
+                            image_grid_thw, suffix_slice, suffix_embeds,
+                            need_logits=False, pool: str = "last"):
+        """Forward the model normally (input_ids + pixel_values, so the model does
+        its OWN image merge - no version-specific vision-tower plumbing), but
+        splice a differentiable suffix embedding into the token-embedding output
+        via a forward hook. Gradients flow to suffix_embeds. Returns
+        ({layer -> last-token hidden state fp32}, logits-or-None)."""
         torch = self.torch
-        inp = self.build_inputs(text, image, add_generation_prompt=True)
-        ids, attn = inp["input_ids"], inp["attention_mask"]
-        pv, grid = inp["pixel_values"], inp["image_grid_thw"]
-        with torch.no_grad():
-            h_std = self.hidden_states_from_pixels(ids, attn, pv, grid)
-            emb = self.build_merged_embeds(ids, pv, grid)
-            h_emb, _ = self.forward_from_embeds(emb, attn)
-        md = max((h_std[l] - h_emb[l]).abs().max().item() for l in h_std)
-        ok = md <= atol
-        logger.info(f"[embed_parity] max|diff| over layers = {md:.4g} -> "
-                    f"{'OK' if ok else 'MISMATCH'}")
-        return ok
+        s, e = suffix_slice.start, suffix_slice.stop
+        emb_module = self.model.get_input_embeddings()
+
+        def _hook(module, inp, out):
+            out = out.clone()
+            out[0, s:e] = suffix_embeds.to(out.dtype)
+            return out
+
+        handle = emb_module.register_forward_hook(_hook)
+        try:
+            out = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values.to(self.model.device, self.dtype),
+                image_grid_thw=image_grid_thw,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+        finally:
+            handle.remove()
+
+        hs = out.hidden_states
+        reps = {}
+        for l in range(1, len(hs)):
+            layer = hs[l]
+            if pool == "mean":
+                m = attention_mask.unsqueeze(-1).to(layer.dtype)
+                vec = (layer * m).sum(1) / m.sum(1).clamp(min=1)
+            else:
+                vec = self._pool_last_token(layer, attention_mask)
+            reps[l] = vec.squeeze(0).float()
+        return reps, (out.logits if need_logits else None)
 
     # ------------------------------------------------------------------ #
     # Stage 2: differentiable pixel_values -> fused hidden states
