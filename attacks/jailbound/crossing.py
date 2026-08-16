@@ -39,7 +39,8 @@ class CrossingConfig:
     eps: float = 8.0 / 255.0        # L_inf image budget in raw [0,1] space
     n_iters: int = 150
     eta: float = 1.0 / 255.0        # PGD step in raw space
-    lambda_geo: float = 1.0
+    lambda_align: float = 1.0       # set 0 to ablate L_align (paper Fig 4)
+    lambda_geo: float = 1.0         # set 0 to ablate L_geo  (paper Fig 4)
     eps_scale: float = 1.0          # scale the target margin eps_l
     pool: str = "last"
 
@@ -137,7 +138,7 @@ def crossing_image(model, text: str, image_path: str, B, cfg: CrossingConfig):
         adv = (base + delta).clamp(0, 1)
         pv, _ = patchify(adv, device=device, dtype=model.dtype)
         h = model.hidden_states_from_pixels(input_ids, attn, pv, grid, cfg.pool)
-        loss = L_align(h, B) + cfg.lambda_geo * L_geo(h, h0, B)
+        loss = cfg.lambda_align * L_align(h, B) + cfg.lambda_geo * L_geo(h, h0, B)
         grad = torch.autograd.grad(loss, delta)[0]
         with torch.no_grad():
             delta = (delta - cfg.eta * grad.sign()).clamp(-cfg.eps, cfg.eps)

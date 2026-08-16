@@ -56,7 +56,7 @@ class JailBoundConfig:
     use_suffix: bool = True
     suffix_len: int = 20
     suffix_iters: int = 100
-    eta_t: float = 0.0005
+    eta_t: float = 0.01
     lambda_sem: float = 2.0
     init_token: str = " x"
 
@@ -94,32 +94,12 @@ class JailBoundAttack(BaseAttack):
             eps_scale=self.cfg.eps_scale, pool=self.cfg.pool)
         self.B = load_boundary(self._cross_cfg, device=self.model.model.device)
 
-        self._suffix_ok: Optional[bool] = None   # decided lazily via parity check
+        self._suffix_failed = False              # set True if suffix errors once
 
         out = self.output_image_dir or Path("attacks/jailbound/cache/adv_images")
         self.images_dir = Path(out); self.images_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ #
-    def _maybe_enable_suffix(self, text, image_path) -> bool:
-        if self._suffix_ok is not None:
-            return self._suffix_ok
-        if not self.cfg.use_suffix:
-            self._suffix_ok = False
-            return False
-        try:
-            from PIL import Image
-            ok = self.model.embed_parity_check(text, Image.open(image_path).convert("RGB"))
-        except Exception as e:
-            logger.warning(f"[jailbound] embed parity check errored ({e}); "
-                           f"suffix disabled, image-only crossing used.")
-            ok = False
-        if not ok:
-            logger.warning("[jailbound] embed-parity MISMATCH; suffix stage disabled "
-                           "(image-only crossing still runs). Fix build_merged_embeds "
-                           "for this transformers version to enable the suffix.")
-        self._suffix_ok = ok
-        return ok
-
     def generate_test_case(self, original_prompt: str, image_path: str,
                            case_id: str, **kwargs) -> TestCase:
         from attacks.jailbound.crossing import crossing_image
@@ -128,18 +108,23 @@ class JailBoundAttack(BaseAttack):
         adv_pil, img_info = crossing_image(self.model, original_prompt, image_path,
                                            self.B, self._cross_cfg)
 
-        # 2) optional suffix (gated on parity check)
+        # 2) optional suffix (robust hook path; falls back to image-only on error)
         jailbreak_prompt = original_prompt
         suffix_info = None
-        if self._maybe_enable_suffix(original_prompt, image_path):
-            from attacks.jailbound.suffix import SuffixConfig, suffix_search
-            scfg = SuffixConfig(suffix_len=self.cfg.suffix_len, n_iters=self.cfg.suffix_iters,
-                                eta_t=self.cfg.eta_t, lambda_geo=self.cfg.lambda_geo,
-                                lambda_sem=self.cfg.lambda_sem, init_token=self.cfg.init_token,
-                                pool=self.cfg.pool)
-            suffix, suffix_info = suffix_search(self.model, original_prompt, adv_pil,
-                                                self.B, scfg)
-            jailbreak_prompt = f"{original_prompt} {suffix}".strip()
+        if self.cfg.use_suffix and not self._suffix_failed:
+            try:
+                from attacks.jailbound.suffix import SuffixConfig, suffix_search
+                scfg = SuffixConfig(suffix_len=self.cfg.suffix_len, n_iters=self.cfg.suffix_iters,
+                                    eta_t=self.cfg.eta_t, lambda_geo=self.cfg.lambda_geo,
+                                    lambda_sem=self.cfg.lambda_sem, init_token=self.cfg.init_token,
+                                    pool=self.cfg.pool)
+                suffix, suffix_info = suffix_search(self.model, original_prompt, adv_pil,
+                                                    self.B, scfg)
+                jailbreak_prompt = f"{original_prompt} {suffix}".strip()
+            except Exception as e:
+                self._suffix_failed = True
+                logger.warning(f"[jailbound] suffix stage errored ({e}); disabling suffix "
+                               f"for the rest of the run, image-only crossing continues.")
 
         # 3) save adversarial image (PNG, at grid resolution -> no re-resize downstream)
         save_path = self.images_dir / f"jailbound_{case_id}.png"

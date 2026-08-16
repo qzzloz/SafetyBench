@@ -56,12 +56,16 @@ class QwenVLWhiteBox:
         self.model_name = model_name
 
         torch_dtype = getattr(torch, dtype, torch.float16)
-        if torch_dtype == torch.bfloat16:
+        if torch_dtype == torch.bfloat16 and not (
+            torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+        ):
             logger.warning(
-                "[QwenWhiteBox] bfloat16 requested but V100 lacks bf16 HW; "
-                "forcing float16."
+                "[QwenWhiteBox] bfloat16 requested but this GPU lacks bf16 HW "
+                "(e.g. V100); forcing float16."
             )
             torch_dtype = torch.float16
+        if torch_dtype == torch.bfloat16:
+            logger.info("[QwenWhiteBox] using bfloat16 (bf16-capable GPU detected).")
         self.dtype = torch_dtype
 
         logger.info(f"[QwenWhiteBox] loading processor: {model_name}")
@@ -260,17 +264,52 @@ class QwenVLWhiteBox:
         """(V, H) input embedding matrix for embedding-space suffix search."""
         return self.model.get_input_embeddings().weight
 
+    def _image_embeds(self, pixel_values, image_grid_thw):
+        """Version-robust image features. Newer transformers move the vision
+        tower under model.model.visual and expose get_image_features(); older
+        ones have model.visual(pixel_values, grid_thw=...)."""
+        torch = self.torch
+        pv = pixel_values.to(self.model.device, self.dtype)
+        # 1) preferred: high-level API. NOTE: some transformers versions return
+        #    a ModelOutput (e.g. BaseModelOutputWithPooling) here instead of a
+        #    tensor, which is why the JOINT path no longer relies on this method
+        #    (forward_joint delegates to forward_with_suffix and lets the model do
+        #    its own merge). Kept robust for any other callers.
+        if hasattr(self.model, "get_image_features"):
+            img = self.model.get_image_features(pixel_values=pv, image_grid_thw=image_grid_thw)
+            if hasattr(img, "last_hidden_state"):          # ModelOutput wrapper
+                img = img.last_hidden_state
+            if isinstance(img, (list, tuple)):
+                img = torch.cat([x for x in img], dim=0)
+            return img.reshape(-1, img.shape[-1])
+        # 2) fallback: locate the visual tower and call it directly
+        for getter in (lambda: self.model.visual,
+                       lambda: self.model.model.visual,
+                       lambda: self.model.model.model.visual):
+            try:
+                vt = getter()
+            except AttributeError:
+                continue
+            if vt is not None:
+                out = vt(pv, grid_thw=image_grid_thw)
+                return out.reshape(-1, out.shape[-1])
+        raise AttributeError("could not locate the Qwen2.5-VL vision tower "
+                             "(tried get_image_features, .visual, .model.visual)")
+
+    def _image_token_id(self):
+        cfg = self.model.config
+        for attr in ("image_token_id", "image_token_index"):
+            if getattr(cfg, attr, None) is not None:
+                return getattr(cfg, attr)
+        raise AttributeError("no image_token_id/image_token_index on config")
+
     def build_merged_embeds(self, input_ids, pixel_values, image_grid_thw):
         """Manually build inputs_embeds with image features scattered in, so we
         can then swap in a differentiable suffix embedding. Mirrors what the
         model does internally (verified by embed_parity_check)."""
-        torch = self.torch
         emb = self.model.get_input_embeddings()(input_ids)          # (1,T,H)
-        image_embeds = self.model.visual(
-            pixel_values.to(self.model.device, self.dtype),
-            grid_thw=image_grid_thw,
-        )
-        mask = (input_ids == self.model.config.image_token_id)
+        image_embeds = self._image_embeds(pixel_values, image_grid_thw)
+        mask = (input_ids == self._image_token_id())
         emb = emb.clone()
         emb[mask] = image_embeds.to(emb.dtype)
         return emb
@@ -297,22 +336,121 @@ class QwenVLWhiteBox:
             reps[l] = vec.squeeze(0).float()
         return reps, (out.logits if need_logits else None)
 
-    def embed_parity_check(self, text, image, atol: float = 2e-2) -> bool:
-        """Verify the manual merge (build_merged_embeds + forward_from_embeds)
-        matches the standard input_ids+pixel_values forward. Run once before
-        trusting the suffix stage."""
+    def forward_with_suffix(self, input_ids, attention_mask, pixel_values,
+                            image_grid_thw, suffix_slice, suffix_embeds,
+                            need_logits=False, pool: str = "last"):
+        """Forward the model normally (input_ids + pixel_values, so the model does
+        its OWN image merge - no version-specific vision-tower plumbing), but
+        splice a differentiable suffix embedding into the token-embedding output
+        via a forward hook. Gradients flow to suffix_embeds. Returns
+        ({layer -> last-token hidden state fp32}, logits-or-None)."""
         torch = self.torch
+        s, e = suffix_slice.start, suffix_slice.stop
+        emb_module = self.model.get_input_embeddings()
+
+        def _hook(module, inp, out):
+            out = out.clone()
+            out[0, s:e] = suffix_embeds.to(out.dtype)
+            return out
+
+        handle = emb_module.register_forward_hook(_hook)
+        try:
+            out = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values.to(self.model.device, self.dtype),
+                image_grid_thw=image_grid_thw,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+        finally:
+            handle.remove()
+
+        hs = out.hidden_states
+        reps = {}
+        for l in range(1, len(hs)):
+            layer = hs[l]
+            if pool == "mean":
+                m = attention_mask.unsqueeze(-1).to(layer.dtype)
+                vec = (layer * m).sum(1) / m.sum(1).clamp(min=1)
+            else:
+                vec = self._pool_last_token(layer, attention_mask)
+            reps[l] = vec.squeeze(0).float()
+        return reps, (out.logits if need_logits else None)
+
+    # ------------------------------------------------------------------ #
+    # Stage 2 (JOINT): image delta_v AND suffix embeds differentiable together
+    # ------------------------------------------------------------------ #
+    def forward_joint(self, input_ids, attention_mask, pixel_values, image_grid_thw,
+                      suffix_slice, suffix_embeds, need_logits=False, pool: str = "last"):
+        """One forward whose fused hidden states are differentiable w.r.t. BOTH
+        the (perturbed) pixel_values and the suffix embeddings simultaneously -
+        the requirement for the paper's joint update (Algorithm 2, one L_total
+        per iteration k).
+
+        Implementation: delegate to `forward_with_suffix`, i.e. pass input_ids +
+        pixel_values so the model performs its OWN image merge (no version-
+        specific vision-tower plumbing, which broke on some transformers builds
+        where get_image_features returns a ModelOutput), and splice the
+        differentiable suffix via a forward hook on the token-embedding module.
+
+        Gradient checkpointing is safe here: the token-embedding + image merge run
+        in the model's OUTER forward, before the checkpointed decoder blocks, so
+        the (suffix-spliced) inputs_embeds is what autograd saves as each block's
+        checkpoint input. Removing the hook after forward() returns therefore does
+        NOT drop the suffix from the graph. Both pixel_values and suffix_embeds
+        keep gradients. Run embed_parity_check() once on your transformers version
+        to confirm both grads are non-zero before trusting a full run.
+
+        Returns ({layer -> last-token hidden state fp32}, logits-or-None).
+        """
+        return self.forward_with_suffix(
+            input_ids, attention_mask, pixel_values, image_grid_thw,
+            suffix_slice, suffix_embeds, need_logits=need_logits, pool=pool)
+
+    def embed_parity_check(self, text: str, image, atol: float = 1e-2,
+                           suffix_len: int = 4, init_token: str = "!") -> bool:
+        """Validate the JOINT forward on THIS transformers version: run
+        forward_joint exactly as the attack does (differentiable pixel_values +
+        differentiable suffix embeddings, one forward under the current gradient-
+        checkpointing setting) and confirm a scalar loss backprops NON-ZERO
+        gradients to BOTH inputs. This is the real precondition for Algorithm 2 -
+        if either grad is missing/zero, the joint update silently degrades to a
+        single-modality attack.
+
+        Returns True iff both grads are present and non-trivial.
+        """
+        torch = self.torch
+        from attacks.jailbound.suffix import build_suffix_ids
+
+        # mirror the attack's input construction
+        input_ids, attn, grid, sl = build_suffix_ids(
+            self, text, image, suffix_len=suffix_len, init_token=init_token)
         inp = self.build_inputs(text, image, add_generation_prompt=True)
-        ids, attn = inp["input_ids"], inp["attention_mask"]
-        pv, grid = inp["pixel_values"], inp["image_grid_thw"]
-        with torch.no_grad():
-            h_std = self.hidden_states_from_pixels(ids, attn, pv, grid)
-            emb = self.build_merged_embeds(ids, pv, grid)
-            h_emb, _ = self.forward_from_embeds(emb, attn)
-        md = max((h_std[l] - h_emb[l]).abs().max().item() for l in h_std)
-        ok = md <= atol
-        logger.info(f"[embed_parity] max|diff| over layers = {md:.4g} -> "
-                    f"{'OK' if ok else 'MISMATCH'}")
+
+        # differentiable pixel_values (leaf)
+        pv = inp["pixel_values"].to(self.model.device, self.dtype).clone().detach()
+        pv.requires_grad_(True)
+        # differentiable suffix embeds (leaf), seeded from the init tokens
+        emb_w = self.token_embedding_matrix()
+        se = emb_w[input_ids[0, sl]].clone().detach().to(self.dtype)
+        se.requires_grad_(True)
+
+        reps, _ = self.forward_joint(input_ids, attn, pv, grid, sl, se,
+                                     need_logits=False, pool="last")
+        l = max(reps.keys())
+        loss = reps[l].float().pow(2).sum()          # arbitrary scalar
+        loss.backward()
+
+        g_img = None if pv.grad is None else float(pv.grad.abs().sum().item())
+        g_sfx = None if se.grad is None else float(se.grad.abs().sum().item())
+        ok_img = g_img is not None and g_img > 0.0
+        ok_sfx = g_sfx is not None and g_sfx > 0.0
+        ok = ok_img and ok_sfx
+        logger.info(f"[parity] joint grad-flow: |grad pixel|={g_img} "
+                    f"|grad suffix|={g_sfx} -> {'OK' if ok else 'MISMATCH'} "
+                    f"(pixel {'ok' if ok_img else 'ZERO/None'}, "
+                    f"suffix {'ok' if ok_sfx else 'ZERO/None'})")
         return ok
 
     # ------------------------------------------------------------------ #
